@@ -1,16 +1,159 @@
-/*
-* MFRC522.cpp - Library to use ARDUINO RFID MODULE KIT 13.56 MHZ WITH TAGS SPI W AND R BY COOQROBOT.
-* NOTE: Please also check the comments in MFRC522.h - they provide useful hints and background information.
+/**
+* MFRC522.cpp - Library to use ARDUINO RFID MODULE KIT 13.56 MHZ WITH TAGS by the Uart interface
+*
+* Based on code Dr.Leong( WWW.B2CQSHOP.COM )
+* Created by Miguel Balboa (circuitito.com), Jan, 2012.
+* Rewritten by Søren Thing Andersen (access.thing.dk), fall of 2013 (Translation to English, refactored, comments, anti collision, cascade levels.)
+* Extended by Tom Clement with functionality to write to sector 0 of UID changeable Mifare cards.
+* Modified MFRC522 librairy SPI interface to be usable in SPI IC2 or UART interface by D.RANTET
 * Released into the public domain.
+*
+* Please read this file for an overview and then MFRC522.cpp for comments on the specific functions.
+* Search for "mf-rc522" on ebay.com to purchase the MF-RC522 board.
+*
+*   To change the interface https://forum.arduino.cc/index.php?topic=442750.0
+*
+* There are three hardware components involved:
+* 1) The micro controller: An Arduino
+* 2) The PCD (short for Proximity Coupling Device): NXP MFRC522 Contactless Reader IC
+* 3) The PICC (short for Proximity Integrated Circuit Card): A card or tag using the ISO 14443A interface, eg Mifare or NTAG203.
+*
+* The microcontroller and card reader uses serial for communication.
+* The protocol is described in the MFRC522 datasheet: http://www.nxp.com/documents/data_sheet/MFRC522.pdf
+*
+* The card reader and the tags communicate using a 13.56MHz electromagnetic field.
+* The protocol is defined in ISO/IEC 14443-3 Identification cards -- Contactless integrated circuit cards -- Proximity cards -- Part 3: Initialization and anticollision".
+* A free version of the final draft can be found at http://wg8.de/wg8n1496_17n3613_Ballot_FCD14443-3.pdf
+* Details are found in chapter 6, Type A – Initialization and anticollision.
+*
+* If only the PICC UID is wanted, the above documents has all the needed information.
+* To read and write from MIFARE PICCs, the MIFARE protocol is used after the PICC has been selected.
+* The MIFARE Classic chips and protocol is described in the datasheets:
+*		1K:   http://www.mouser.com/ds/2/302/MF1S503x-89574.pdf
+* 		4K:   http://datasheet.octopart.com/MF1S7035DA4,118-NXP-Semiconductors-datasheet-11046188.pdf
+* 		Mini: http://www.idcardmarket.com/download/mifare_S20_datasheet.pdf
+* The MIFARE Ultralight chip and protocol is described in the datasheets:
+*		Ultralight:   http://www.nxp.com/documents/data_sheet/MF0ICU1.pdf
+* 		Ultralight C: http://www.nxp.com/documents/short_data_sheet/MF0ICU2_SDS.pdf
+*
+* MIFARE Classic 1K (MF1S503x):
+* 		Has 16 sectors * 4 blocks/sector * 16 bytes/block = 1024 bytes.
+* 		The blocks are numbered 0-63.
+* 		Block 3 in each sector is the Sector Trailer. See http://www.mouser.com/ds/2/302/MF1S503x-89574.pdf sections 8.6 and 8.7:
+* 				Bytes 0-5:   Key A
+* 				Bytes 6-8:   Access Bits
+* 				Bytes 9:     User data
+* 				Bytes 10-15: Key B (or user data)
+* 		Block 0 is read-only manufacturer data.
+* 		To access a block, an authentication using a key from the block's sector must be performed first.
+* 		Example: To read from block 10, first authenticate using a key from sector 3 (blocks 8-11).
+* 		All keys are set to FFFFFFFFFFFFh at chip delivery.
+* 		Warning: Please read section 8.7 "Memory Access". It includes this text: if the PICC detects a format violation the whole sector is irreversibly blocked.
+*		To use a block in "value block" mode (for Increment/Decrement operations) you need to change the sector trailer. Use PICC_SetAccessBits() to calculate the bit patterns.
+* MIFARE Classic 4K (MF1S703x):
+* 		Has (32 sectors * 4 blocks/sector + 8 sectors * 16 blocks/sector) * 16 bytes/block = 4096 bytes.
+* 		The blocks are numbered 0-255.
+* 		The last block in each sector is the Sector Trailer like above.
+* MIFARE Classic Mini (MF1 IC S20):
+* 		Has 5 sectors * 4 blocks/sector * 16 bytes/block = 320 bytes.
+* 		The blocks are numbered 0-19.
+* 		The last block in each sector is the Sector Trailer like above.
+*
+* MIFARE Ultralight (MF0ICU1):
+* 		Has 16 pages of 4 bytes = 64 bytes.
+* 		Pages 0 + 1 is used for the 7-byte UID.
+* 		Page 2 contains the last check digit for the UID, one byte manufacturer internal data, and the lock bytes (see http://www.nxp.com/documents/data_sheet/MF0ICU1.pdf section 8.5.2)
+* 		Page 3 is OTP, One Time Programmable bits. Once set to 1 they cannot revert to 0.
+* 		Pages 4-15 are read/write unless blocked by the lock bytes in page 2.
+* MIFARE Ultralight C (MF0ICU2):
+* 		Has 48 pages of 4 bytes = 192 bytes.
+* 		Pages 0 + 1 is used for the 7-byte UID.
+* 		Page 2 contains the last check digit for the UID, one byte manufacturer internal data, and the lock bytes (see http://www.nxp.com/documents/data_sheet/MF0ICU1.pdf section 8.5.2)
+* 		Page 3 is OTP, One Time Programmable bits. Once set to 1 they cannot revert to 0.
+* 		Pages 4-39 are read/write unless blocked by the lock bytes in page 2.
+* 		Page 40 Lock bytes
+* 		Page 41 16 bit one way counter
+* 		Pages 42-43 Authentication configuration
+* 		Pages 44-47 Authentication key
 */
-
 #include <Arduino.h>
 #include "MFRC522.h"
-#include "MFRC522Debug.h"
+#ifndef ESP8266
+#include <avr/wdt.h>
+#endif // !ESP8266
+
+
 
 /////////////////////////////////////////////////////////////////////////////////////
 // Functions for setting up the Arduino
 /////////////////////////////////////////////////////////////////////////////////////
+
+
+/**
+ * Constructors.
+ */
+
+//constructors for SPI interface
+MFRC522::MFRC522(SPIClass& spi): MFRC522(spi, SS, UINT8_MAX) { } 
+	// SS is defined in pins_arduino.h, 
+	//UINT8_MAX means there is no connection from Arduino to MFRC522's reset and power down input
+
+
+MFRC522::MFRC522(SPIClass& spi, byte resetPin) : MFRC522(spi, SS, resetPin) {}
+	// SS is defined in pins_arduino.h, 
+
+
+MFRC522::MFRC522(SPIClass& spi, byte CS, byte resetPin) :
+	_spi(spi), _chipSelectPin(CS), _resetPowerDownPin(resetPin) {
+	
+	WritePt = &MFRC522::SPI__WriteRegister;
+	BigWritePt = &MFRC522::SPI__BigWriteRegister;
+	ReadPt = &MFRC522::SPI__ReadRegister;
+	BigReadPt = &MFRC522::SPI__BigReadRegister;
+
+}
+
+//contructors for TWOWIRE interface
+MFRC522::MFRC522(TwoWire& twr, int Address) : MFRC522(twr, Address, UINT8_MAX) {}
+//UINT8_MAX means there is no connection from Arduino to MFRC522's reset and power down input
+
+
+MFRC522::MFRC522(TwoWire& twr, int Address, byte resetPin) : 
+	_wire(twr), _MFRC522Address((byte)(Address & 0x7F)), _resetPowerDownPin(resetPin) {
+
+	WritePt = &MFRC522::WIRE_WriteRegister;
+	BigWritePt = &MFRC522::WIRE_BigWriteRegister;
+	ReadPt = &MFRC522::WIRE_ReadRegister;
+	BigReadPt = &MFRC522::WIRE_BigReadRegister;
+	_wire.setClock(90000);
+
+}
+
+
+// contructors for UART interface
+MFRC522::MFRC522(HardwareSerial& srl) : MFRC522(srl, UINT8_MAX) {}
+MFRC522::MFRC522(SoftwareSerial& srl) : MFRC522(srl, UINT8_MAX) {}
+//UINT8_MAX means there is no connection from Arduino to MFRC522's reset and power down input
+
+
+MFRC522::MFRC522(HardwareSerial& srl, byte resetPin) : _serialx(srl), _resetPowerDownPin(resetPin) {
+
+	WritePt = &MFRC522::UART_WriteRegister;
+	BigWritePt = &MFRC522::UART_BigWriteRegister;
+	ReadPt = &MFRC522::UART_ReadRegister;
+	BigReadPt = &MFRC522::UART_BigReadRegister;
+}
+
+MFRC522::MFRC522(SoftwareSerial& srl, byte resetPin) : _softserial(srl), _resetPowerDownPin(resetPin) {
+
+	WritePt = &MFRC522::SftUART_WriteRegister;
+	BigWritePt = &MFRC522::SftUART_BigWriteRegister;
+	ReadPt = &MFRC522::SftUART_ReadRegister;
+	BigReadPt = &MFRC522::SftUART_BigReadRegister;
+}
+
+// End constructors
+
 
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -21,56 +164,59 @@
  * Writes a byte to the specified register in the MFRC522 chip.
  * The interface is described in the datasheet section 8.1.2.
  */
-void MFRC522::PCD_WriteRegister(	PCD_Register reg,	///< The register to write to. One of the PCD_Register enums.
+
+// SPI INTERFACE
+//################
+void MFRC522::SPI__WriteRegister(	PCD_Register reg,	///< The register to write to. One of the PCD_Register enums.
 									byte value			///< The value to write.
 								) {
-	_spiClass->beginTransaction(_spiSettings);	// Set the settings to work with SPI bus
+	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
 	digitalWrite(_chipSelectPin, LOW);		// Select slave
-	_spiClass->transfer(reg);						// MSB == 0 is for writing. LSB is not used in address. Datasheet section 8.1.2.3.
-	_spiClass->transfer(value);
+	SPI.transfer(reg<<1);						// MSB == 0 is for writing. LSB is not used in address. Datasheet section 8.1.2.3.
+	SPI.transfer(value);
 	digitalWrite(_chipSelectPin, HIGH);		// Release slave again
-	_spiClass->endTransaction(); // Stop using the SPI bus
-} // End PCD_WriteRegister()
+	SPI.endTransaction(); // Stop using the SPI bus
+} // End SPI_WriteRegister()
 
 /**
  * Writes a number of bytes to the specified register in the MFRC522 chip.
  * The interface is described in the datasheet section 8.1.2.
  */
-void MFRC522::PCD_WriteRegister(	PCD_Register reg,	///< The register to write to. One of the PCD_Register enums.
+void MFRC522::SPI__BigWriteRegister(	PCD_Register reg,	///< The register to write to. One of the PCD_Register enums.
 									byte count,			///< The number of bytes to write to the register
 									byte *values		///< The values to write. Byte array.
 								) {
-	_spiClass->beginTransaction(_spiSettings);	// Set the settings to work with SPI bus
+	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
 	digitalWrite(_chipSelectPin, LOW);		// Select slave
-	_spiClass->transfer(reg);						// MSB == 0 is for writing. LSB is not used in address. Datasheet section 8.1.2.3.
+	SPI.transfer(reg<<1);		// MSB == 0 is for writing. LSB is not used in address. Datasheet section 8.1.2.3.
 	for (byte index = 0; index < count; index++) {
-		_spiClass->transfer(values[index]);
+		SPI.transfer(values[index]);
 	}
 	digitalWrite(_chipSelectPin, HIGH);		// Release slave again
-	_spiClass->endTransaction(); // Stop using the SPI bus
-} // End PCD_WriteRegister()
+	SPI.endTransaction(); // Stop using the SPI bus
+} // End SPI_WriteRegister()
 
 /**
  * Reads a byte from the specified register in the MFRC522 chip.
  * The interface is described in the datasheet section 8.1.2.
  */
-byte MFRC522::PCD_ReadRegister(	PCD_Register reg	///< The register to read from. One of the PCD_Register enums.
+byte MFRC522::SPI__ReadRegister(	PCD_Register reg	///< The register to read from. One of the PCD_Register enums.
 								) {
 	byte value;
-	_spiClass->beginTransaction(_spiSettings);	// Set the settings to work with SPI bus
+	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
 	digitalWrite(_chipSelectPin, LOW);			// Select slave
-	_spiClass->transfer(0x80 | reg);					// MSB == 1 is for reading. LSB is not used in address. Datasheet section 8.1.2.3.
-	value = _spiClass->transfer(0);					// Read the value back. Send 0 to stop reading.
+	SPI.transfer(0x80 | (reg<<1));					// MSB == 1 is for reading. LSB is not used in address. Datasheet section 8.1.2.3.
+	value = SPI.transfer(0);					// Read the value back. Send 0 to stop reading.
 	digitalWrite(_chipSelectPin, HIGH);			// Release slave again
-	_spiClass->endTransaction(); // Stop using the SPI bus
+	SPI.endTransaction(); // Stop using the SPI bus
 	return value;
-} // End PCD_ReadRegister()
+} // End SPI_ReadRegister()
 
 /**
  * Reads a number of bytes from the specified register in the MFRC522 chip.
  * The interface is described in the datasheet section 8.1.2.
  */
-void MFRC522::PCD_ReadRegister(	PCD_Register reg,	///< The register to read from. One of the PCD_Register enums.
+void MFRC522::SPI__BigReadRegister(	PCD_Register reg,	///< The register to read from. One of the PCD_Register enums.
 								byte count,			///< The number of bytes to read
 								byte *values,		///< Byte array to store the values in.
 								byte rxAlign		///< Only bit positions rxAlign..7 in values[0] are updated.
@@ -79,29 +225,232 @@ void MFRC522::PCD_ReadRegister(	PCD_Register reg,	///< The register to read from
 		return;
 	}
 	//Serial.print(F("Reading ")); 	Serial.print(count); Serial.println(F(" bytes from register."));
-	byte address = 0x80 | reg;				// MSB == 1 is for reading. LSB is not used in address. Datasheet section 8.1.2.3.
+	byte address = 0x80 | (reg<<1);	// MSB == 1 is for reading. LSB is not used in address. Datasheet section 8.1.2.3.
 	byte index = 0;							// Index in values array.
-	_spiClass->beginTransaction(_spiSettings);	// Set the settings to work with SPI bus
+	SPI.beginTransaction(SPISettings(MFRC522_SPICLOCK, MSBFIRST, SPI_MODE0));	// Set the settings to work with SPI bus
 	digitalWrite(_chipSelectPin, LOW);		// Select slave
 	count--;								// One read is performed outside of the loop
-	_spiClass->transfer(address);					// Tell MFRC522 which address we want to read
+	SPI.transfer(address);					// Tell MFRC522 which address we want to read
 	if (rxAlign) {		// Only update bit positions rxAlign..7 in values[0]
 		// Create bit mask for bit positions rxAlign..7
 		byte mask = (0xFF << rxAlign) & 0xFF;
 		// Read value and tell that we want to read the same address again.
-		byte value = _spiClass->transfer(address);
+		byte value = SPI.transfer(address);
 		// Apply mask to both current value of values[0] and the new data in value.
 		values[0] = (values[0] & ~mask) | (value & mask);
 		index++;
 	}
 	while (index < count) {
-		values[index] = _spiClass->transfer(address);	// Read value and tell that we want to read the same address again.
+		values[index] = SPI.transfer(address);	// Read value and tell that we want to read the same address again.
 		index++;
 	}
-	values[index] = _spiClass->transfer(0);			// Read the final byte. Send 0 to stop reading.
+	values[index] = SPI.transfer(0);			// Read the final byte. Send 0 to stop reading.
 	digitalWrite(_chipSelectPin, HIGH);			// Release slave again
-	_spiClass->endTransaction(); // Stop using the SPI bus
-} // End PCD_ReadRegister()
+	SPI.endTransaction(); // Stop using the SPI bus
+} // End SPI_ReadRegister()
+
+
+
+  // TwoWIRE INTERFACE (I2C)
+  //################
+void MFRC522::WIRE_WriteRegister(PCD_Register reg, byte value)
+{
+	_wire.beginTransmission(_MFRC522Address);
+	_wire.write(reg);
+	_wire.write(value);
+	_wire.endTransmission();
+
+}//2wire_WriteRegister
+
+ /**
+ * Writes a number of bytes to the specified register in the MFRC522 chip.
+ * The interface is described in the datasheet section 8.1.2.
+ */
+void MFRC522::WIRE_BigWriteRegister(PCD_Register reg, byte count, byte *values)
+{
+	byte index = 0;
+	_wire.beginTransmission(_MFRC522Address);
+	_wire.write(reg);
+	while (count--) {
+		_wire.write(values[index++]);//write all at same add (ex: FIFO)
+	}//while
+	_wire.endTransmission();
+
+}//2wire_WriteRegister[] 
+
+ /**
+ * Reads a byte from the specified register in the MFRC522 chip.
+ * The interface is described in the datasheet section 8.1.2.
+ */
+byte MFRC522::WIRE_ReadRegister(PCD_Register reg)
+{
+	byte data = 0 , l;
+	_wire.beginTransmission(_MFRC522Address);
+	_wire.write(reg);
+	_wire.endTransmission();
+	l =_wire.requestFrom(_MFRC522Address, 1u );
+	if(l==1)
+	data = _wire.read();
+	return data;
+}//2wire_ReadRegister
+
+ /**
+ * Reads a number of bytes from the specified register in the MFRC522 chip.
+ * The interface is described in the datasheet section 8.1.2.
+ */
+void MFRC522::WIRE_BigReadRegister(PCD_Register reg, byte count, byte *values, byte rxAlign = 0)
+{
+	if (count == 0) return;
+	byte index = 0;
+	byte data0 = values[0]; //save last incomplete byte
+	_wire.beginTransmission(_MFRC522Address);
+	_wire.write(reg);
+	_wire.endTransmission();
+
+	count =_wire.requestFrom(this->_MFRC522Address,count);
+	_wire.endTransmission();
+	while (_wire.available()) {
+		if (index < count) {values[index++] = _wire.read();}		
+		else {_wire.read();} //protection against too mush data in stream
+	} //while
+
+	if (rxAlign) {		// Only update bit positions rxAlign 1..7 in values[0]				
+		byte mask = (0xFF << rxAlign) & 0xFF;// Create bit mask for bit positions rxAlign..7
+		// Apply mask to both current value of values[0] and the first readen data.
+		values[0] = ( values[0] & mask) | ( data0 & ~mask);
+		//                 new  msb     |    last lsb  
+	}//if
+	
+
+}//2WIRE_ReadRegister[] 
+
+
+
+
+
+  // UART INTERFACE 
+  //################
+#define RxFlush(Srl) while (Srl.available()) {	Srl.read();}  // empty the receiver buffer (Srl type is HardwareSerial*)
+
+	/**
+	* Writes a byte to the specified register in the MFRC522 chip.
+	* The interface is described in the datasheet section 8.1.2.
+	*/
+void MFRC522::UART_WriteRegister(PCD_Register reg, byte value)
+{
+
+	while (!_serialx.availableForWrite()) {}
+	_serialx.write(reg);
+	while (!_serialx.availableForWrite()) {}
+	_serialx.write(value);
+
+
+	
+	
+
+}//!UART_WriteRegister
+
+void MFRC522::SftUART_WriteRegister(PCD_Register reg, byte value)
+{
+	_softserial.write(reg);
+	_softserial.write(value);
+}//!SftUART_WriteRegister
+
+   /**
+   * Writes a number of bytes to the specified register in the MFRC522 chip.
+   * The interface is described in the datasheet section 8.1.2.
+   */
+void MFRC522::UART_BigWriteRegister(PCD_Register reg, byte count, byte *values)
+{
+	byte index = 0;
+	while (index < count) {
+		UART_WriteRegister(reg, values[index++]); //write all at same add (ex: FIFO)
+	}//while
+}//UART_BigWriteRegister[] 
+
+
+void MFRC522::SftUART_BigWriteRegister(PCD_Register reg, byte count, byte *values)
+{
+	byte index = 0;
+	while (index < count) {
+		SftUART_WriteRegister(reg, values[index++]); //write all at same add (ex: FIFO)
+	}//while
+}//SftUART_BigWriteRegister[] 
+
+ /**
+   * Reads a byte from the specified register in the MFRC522 chip.
+   * The interface is described in the datasheet section 8.1.2.
+   */
+byte MFRC522::UART_ReadRegister(PCD_Register reg)
+{
+	_serialx.flush();  // wait for all tx ouput end
+
+	while (!_serialx.availableForWrite()) {}
+	RxFlush(_serialx); // clean	Rx buffer
+	_serialx.write(reg + 0x80); //address + read bit
+	delayMicroseconds(2200);  //wait for a send + receive time @ 9600 baud  
+	return _serialx.read(); 
+}//UART_ReadRegister
+
+byte MFRC522::SftUART_ReadRegister(PCD_Register reg) 
+{
+	RxFlush(_softserial); //clean rx buffer
+	_softserial.write(reg + 0x80); //address + read bit
+	delayMicroseconds(1200);  //wait for a receive time @ 9600 baud  
+	return _softserial.read();
+}//SftUART_ReadRegister
+
+  /**
+  * Reads a number of bytes from the specified register in the MFRC522 chip.
+  * The interface is described in the datasheet section 8.1.2.
+  */
+void MFRC522::UART_BigReadRegister(PCD_Register reg, byte count, byte *values, byte rxAlign)
+{
+	if (count == 0) return;
+	byte index = 0;
+
+	if (rxAlign) {		// Only update bit positions rxAlign..7 in values[0]
+						// Create bit mask for bit positions rxAlign..7
+		byte mask = (0xFF << rxAlign) & 0xFF;
+		byte value0 = UART_ReadRegister(reg);
+		// Apply mask to both current value of values[0] and the first readen data.
+		values[0] = (values[0] & ~mask) | (value0 & mask);
+		index++;
+	}//if
+
+	while (index < count) {
+		values[index++] = UART_ReadRegister(reg);
+	}//while
+
+}//UART_BigReadRegister[]
+
+void MFRC522::SftUART_BigReadRegister(PCD_Register reg, byte count, byte *values, byte rxAlign)
+{
+	if (count == 0) return;
+	byte index = 0;
+
+	if (rxAlign) {		// Only update bit positions rxAlign..7 in values[0]
+						// Create bit mask for bit positions rxAlign..7
+		byte mask = (0xFF << rxAlign) & 0xFF;
+		byte value0 = SftUART_ReadRegister(reg);
+		// Apply mask to both current value of values[0] and the first readen data.
+		values[0] = (values[0] & ~mask) | (value0 & mask);
+		index++;
+	}//if
+
+	while (index < count) {
+		values[index++] = SftUART_ReadRegister(reg);
+	}//while
+
+}//SftUART_BigReadRegister[]
+
+	
+
+
+
+
+
+
 
 /**
  * Sets the bits given in mask in register reg.
@@ -168,15 +517,17 @@ MFRC522::StatusCode MFRC522::PCD_CalculateCRC(	byte *data,		///< In: Pointer to 
 /**
  * Initializes the MFRC522 chip.
  */
-void MFRC522::PCD_Init() {
+void MFRC522::PCD_Init(void) {
 	bool hardReset = false;
 
 	// Set the chipSelectPin as digital output, do not select the slave yet
-	pinMode(_chipSelectPin, OUTPUT);
-	digitalWrite(_chipSelectPin, HIGH);
-	
+	if (_chipSelectPin != UINT8_MAX) {
+		pinMode(_chipSelectPin, OUTPUT);
+		digitalWrite(_chipSelectPin, HIGH);
+	}
+
 	// If a valid pin number has been set, pull device out of power down / reset state.
-	if (_resetPowerDownPin != UNUSED_PIN) {
+	if (_resetPowerDownPin != UINT8_MAX) {
 		// Set the resetPowerDownPin as digital output, do not reset or power down.
 		pinMode(_resetPowerDownPin, OUTPUT);
 	
@@ -189,8 +540,11 @@ void MFRC522::PCD_Init() {
 	}
 
 	if (!hardReset) { // Perform a soft reset if we haven't triggered a hard reset above.
+	
+
 		PCD_Reset();
 	}
+
 	
 	// Reset baud rates
 	PCD_WriteRegister(TxModeReg, 0x00);
@@ -211,17 +565,8 @@ void MFRC522::PCD_Init() {
 	PCD_AntennaOn();						// Enable the antenna driver pins TX1 and TX2 (they were disabled by the reset)
 } // End PCD_Init()
 
-/**
- * Initializes the MFRC522 chip.
- */
-void MFRC522::PCD_Init(	byte chipSelectPin,		///< Arduino pin connected to MFRC522's SPI slave select input (Pin 24, NSS, active low)
-						byte resetPowerDownPin	///< Arduino pin connected to MFRC522's reset and power down input (Pin 6, NRSTPD, active low)
-					) {
-	_chipSelectPin = chipSelectPin;
-	_resetPowerDownPin = resetPowerDownPin; 
-	// Set the chipSelectPin as digital output, do not select the slave yet
-	PCD_Init();
-} // End PCD_Init()
+
+
 
 /**
  * Performs a soft reset on the MFRC522 chip and waits for it to be ready again.
@@ -233,9 +578,21 @@ void MFRC522::PCD_Reset() {
 	// Section 8.8.2 in the datasheet says the oscillator start-up time is the start up time of the crystal + 37,74μs. Let us be generous: 50ms.
 	delay(50);
 	// Wait for the PowerDown bit in CommandReg to be cleared
+
+	byte abyte=10;
 	while (PCD_ReadRegister(CommandReg) & (1<<4)) {
+		Serial.print(".");
 		// PCD still restarting - unlikely after waiting 50ms, but better safe than sorry.
+		delay(500);
+		if (!abyte--) {
+			Serial.println("\n\r   read seems bad !!!"); 
+			abyte = 10;
+		}
 	}
+
+
+
+
 } // End PCD_Reset()
 
 /**
@@ -364,35 +721,6 @@ bool MFRC522::PCD_PerformSelfTest() {
 } // End PCD_PerformSelfTest()
 
 /////////////////////////////////////////////////////////////////////////////////////
-// Power control
-/////////////////////////////////////////////////////////////////////////////////////
-
-//IMPORTANT NOTE!!!!
-//Calling any other function that uses CommandReg will disable soft power down mode !!!
-//For more details about power control, refer to the datasheet - page 33 (8.6)
-
-void MFRC522::PCD_SoftPowerDown(){//Note : Only soft power down mode is available throught software
-	byte val = PCD_ReadRegister(CommandReg); // Read state of the command register 
-	val |= (1<<4);// set PowerDown bit ( bit 4 ) to 1 
-	PCD_WriteRegister(CommandReg, val);//write new value to the command register
-}
-
-void MFRC522::PCD_SoftPowerUp(){
-	byte val = PCD_ReadRegister(CommandReg); // Read state of the command register 
-	val &= ~(1<<4);// set PowerDown bit ( bit 4 ) to 0 
-	PCD_WriteRegister(CommandReg, val);//write new value to the command register
-	// wait until PowerDown bit is cleared (this indicates end of wake up procedure) 
-	const uint32_t timeout = (uint32_t)millis() + 500;// create timer for timeout (just in case) 
-	
-	while(millis()<=timeout){ // set timeout to 500 ms 
-		val = PCD_ReadRegister(CommandReg);// Read state of the command register
-		if(!(val & (1<<4))){ // if powerdown bit is 0 
-			break;// wake up procedure is finished 
-		}
-	}
-}
-
-/////////////////////////////////////////////////////////////////////////////////////
 // Functions for communicating with PICCs
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -404,9 +732,9 @@ void MFRC522::PCD_SoftPowerUp(){
  */
 MFRC522::StatusCode MFRC522::PCD_TransceiveData(	byte *sendData,		///< Pointer to the data to transfer to the FIFO.
 													byte sendLen,		///< Number of bytes to transfer to the FIFO.
-													byte *backData,		///< nullptr or pointer to buffer if data should be read back after executing the command.
+													byte *backData,		///< NULL or pointer to buffer if data should be read back after executing the command.
 													byte *backLen,		///< In: Max number of bytes to write to *backData. Out: The number of bytes returned.
-													byte *validBits,	///< In/Out: The number of valid bits in the last byte. 0 for 8 valid bits. Default nullptr.
+													byte *validBits,	///< In/Out: The number of valid bits in the last byte. 0 for 8 valid bits. Default NULL.
 													byte rxAlign,		///< In: Defines the bit position in backData[0] for the first bit received. Default 0.
 													bool checkCRC		///< In: True => The last two bytes of the response is assumed to be a CRC_A that must be validated.
 								 ) {
@@ -424,7 +752,7 @@ MFRC522::StatusCode MFRC522::PCD_CommunicateWithPICC(	byte command,		///< The co
 														byte waitIRq,		///< The bits in the ComIrqReg register that signals successful completion of the command.
 														byte *sendData,		///< Pointer to the data to transfer to the FIFO.
 														byte sendLen,		///< Number of bytes to transfer to the FIFO.
-														byte *backData,		///< nullptr or pointer to buffer if data should be read back after executing the command.
+														byte *backData,		///< NULL or pointer to buffer if data should be read back after executing the command.
 														byte *backLen,		///< In: Max number of bytes to write to *backData. Out: The number of bytes returned.
 														byte *validBits,	///< In/Out: The number of valid bits in the last byte. 0 for 8 valid bits.
 														byte rxAlign,		///< In: Defines the bit position in backData[0] for the first bit received. Default 0.
@@ -551,7 +879,7 @@ MFRC522::StatusCode MFRC522::PICC_REQA_or_WUPA(	byte command, 		///< The command
 	byte validBits;
 	MFRC522::StatusCode status;
 	
-	if (bufferATQA == nullptr || *bufferSize < 2) {	// The ATQA response is 2 bytes long.
+	if (bufferATQA == NULL || *bufferSize < 2) {	// The ATQA response is 2 bytes long.
 		return STATUS_NO_ROOM;
 	}
 	PCD_ClearRegisterBitMask(CollReg, 0x80);		// ValuesAfterColl=1 => Bits received after collision are cleared.
@@ -583,7 +911,7 @@ MFRC522::StatusCode MFRC522::PICC_REQA_or_WUPA(	byte command, 		///< The command
  * 
  * @return STATUS_OK on success, STATUS_??? otherwise.
  */
-MFRC522::StatusCode MFRC522::PICC_Select(	Uid *uid,			///< Pointer to Uid struct. Normally output, but can also be used to supply a known UID.
+MFRC522::StatusCode MFRC522::PICC_Select(	PICC_Uid *uid,			///< Pointer to Uid struct. Normally output, but can also be used to supply a known UID.
 											byte validBits		///< The number of known UID bits supplied in *uid. Normally 0. If set you must also supply uid->size.
 										 ) {
 	bool uidComplete;
@@ -816,7 +1144,7 @@ MFRC522::StatusCode MFRC522::PICC_HaltA() {
 	//		If the PICC responds with any modulation during a period of 1 ms after the end of the frame containing the
 	//		HLTA command, this response shall be interpreted as 'not acknowledge'.
 	// We interpret that this way: Only STATUS_TIMEOUT is a success.
-	result = PCD_TransceiveData(buffer, sizeof(buffer), nullptr, 0);
+	result = PCD_TransceiveData(buffer, sizeof(buffer), NULL, 0);
 	if (result == STATUS_TIMEOUT) {
 		return STATUS_OK;
 	}
@@ -845,7 +1173,7 @@ MFRC522::StatusCode MFRC522::PICC_HaltA() {
 MFRC522::StatusCode MFRC522::PCD_Authenticate(byte command,		///< PICC_CMD_MF_AUTH_KEY_A or PICC_CMD_MF_AUTH_KEY_B
 											byte blockAddr, 	///< The block number. See numbering in the comments in the .h file.
 											MIFARE_Key *key,	///< Pointer to the Crypteo1 key to use (6 bytes)
-											Uid *uid			///< Pointer to Uid struct. The first 4 bytes of the UID is used.
+											PICC_Uid *uid			///< Pointer to Uid struct. The first 4 bytes of the UID is used.
 											) {
 	byte waitIRq = 0x10;		// IdleIRq
 	
@@ -900,7 +1228,7 @@ MFRC522::StatusCode MFRC522::MIFARE_Read(	byte blockAddr, 	///< MIFARE Classic: 
 	MFRC522::StatusCode result;
 	
 	// Sanity check
-	if (buffer == nullptr || *bufferSize < 18) {
+	if (buffer == NULL || *bufferSize < 18) {
 		return STATUS_NO_ROOM;
 	}
 	
@@ -914,7 +1242,7 @@ MFRC522::StatusCode MFRC522::MIFARE_Read(	byte blockAddr, 	///< MIFARE Classic: 
 	}
 	
 	// Transmit the buffer and receive the response, validate CRC_A.
-	return PCD_TransceiveData(buffer, 4, buffer, bufferSize, nullptr, 0, true);
+	return PCD_TransceiveData(buffer, 4, buffer, bufferSize, NULL, 0, true);
 } // End MIFARE_Read()
 
 /**
@@ -935,7 +1263,7 @@ MFRC522::StatusCode MFRC522::MIFARE_Write(	byte blockAddr, ///< MIFARE Classic: 
 	MFRC522::StatusCode result;
 	
 	// Sanity check
-	if (buffer == nullptr || bufferSize < 16) {
+	if (buffer == NULL || bufferSize < 16) {
 		return STATUS_INVALID;
 	}
 	
@@ -970,7 +1298,7 @@ MFRC522::StatusCode MFRC522::MIFARE_Ultralight_Write(	byte page, 		///< The page
 	MFRC522::StatusCode result;
 	
 	// Sanity check
-	if (buffer == nullptr || bufferSize < 4) {
+	if (buffer == NULL || bufferSize < 4) {
 		return STATUS_INVALID;
 	}
 	
@@ -1203,7 +1531,7 @@ MFRC522::StatusCode MFRC522::PCD_MIFARE_Transceive(	byte *sendData,		///< Pointe
 	byte cmdBuffer[18]; // We need room for 16 bytes data and 2 bytes CRC_A.
 	
 	// Sanity check
-	if (sendData == nullptr || sendLen > 16) {
+	if (sendData == NULL || sendLen > 16) {
 		return STATUS_INVALID;
 	}
 	
@@ -1243,7 +1571,18 @@ MFRC522::StatusCode MFRC522::PCD_MIFARE_Transceive(	byte *sendData,		///< Pointe
  */
 const __FlashStringHelper *MFRC522::GetStatusCodeName(MFRC522::StatusCode code	///< One of the StatusCode enums.
 										) {
-	return MFRC522Debug::GetStatusCodeName(code);
+	switch (code) {
+		case STATUS_OK:				return F("Success.");
+		case STATUS_ERROR:			return F("Error in communication.");
+		case STATUS_COLLISION:		return F("Collission detected.");
+		case STATUS_TIMEOUT:		return F("Timeout in communication.");
+		case STATUS_NO_ROOM:		return F("A buffer is not big enough.");
+		case STATUS_INTERNAL_ERROR:	return F("Internal error in the code. Should not happen.");
+		case STATUS_INVALID:		return F("Invalid argument.");
+		case STATUS_CRC_WRONG:		return F("The CRC_A does not match.");
+		case STATUS_MIFARE_NACK:	return F("A MIFARE PICC responded with NAK.");
+		default:					return F("Unknown error");
+	}
 } // End GetStatusCodeName()
 
 /**
@@ -1280,7 +1619,20 @@ MFRC522::PICC_Type MFRC522::PICC_GetType(byte sak		///< The SAK byte returned fr
  */
 const __FlashStringHelper *MFRC522::PICC_GetTypeName(PICC_Type piccType	///< One of the PICC_Type enums.
 													) {
-	return MFRC522Debug::PICC_GetTypeName(piccType);
+	switch (piccType) {
+		case PICC_TYPE_ISO_14443_4:		return F("PICC compliant with ISO/IEC 14443-4");
+		case PICC_TYPE_ISO_18092:		return F("PICC compliant with ISO/IEC 18092 (NFC)");
+		case PICC_TYPE_MIFARE_MINI:		return F("MIFARE Mini, 320 bytes");
+		case PICC_TYPE_MIFARE_1K:		return F("MIFARE 1KB");
+		case PICC_TYPE_MIFARE_4K:		return F("MIFARE 4KB");
+		case PICC_TYPE_MIFARE_UL:		return F("MIFARE Ultralight or Ultralight C");
+		case PICC_TYPE_MIFARE_PLUS:		return F("MIFARE Plus");
+		case PICC_TYPE_MIFARE_DESFIRE:	return F("MIFARE DESFire");
+		case PICC_TYPE_TNP3XXX:			return F("MIFARE TNP3XXX");
+		case PICC_TYPE_NOT_COMPLETE:	return F("SAK indicates UID is not complete.");
+		case PICC_TYPE_UNKNOWN:
+		default:						return F("Unknown type");
+	}
 } // End PICC_GetTypeName()
 
 /**
@@ -1312,7 +1664,7 @@ void MFRC522::PCD_DumpVersionToSerial() {
  *
  * @DEPRECATED Kept for bakward compatibility
  */
-void MFRC522::PICC_DumpToSerial(Uid *uid	///< Pointer to Uid struct returned from a successful PICC_Select().
+void MFRC522::PICC_DumpToSerial(PICC_Uid *uid	///< Pointer to Uid struct returned from a successful PICC_Select().
 								) {
 	MIFARE_Key key;
 	
@@ -1359,7 +1711,7 @@ void MFRC522::PICC_DumpToSerial(Uid *uid	///< Pointer to Uid struct returned fro
  *
  * @DEPRECATED kept for backward compatibility
  */
-void MFRC522::PICC_DumpDetailsToSerial(Uid *uid	///< Pointer to Uid struct returned from a successful PICC_Select().
+void MFRC522::PICC_DumpDetailsToSerial(PICC_Uid *uid	///< Pointer to Uid struct returned from a successful PICC_Select().
 									) {
 	// UID
 	Serial.print(F("Card UID:"));
@@ -1388,7 +1740,7 @@ void MFRC522::PICC_DumpDetailsToSerial(Uid *uid	///< Pointer to Uid struct retur
  * Dumps memory contents of a MIFARE Classic PICC.
  * On success the PICC is halted after dumping the data.
  */
-void MFRC522::PICC_DumpMifareClassicToSerial(	Uid *uid,			///< Pointer to Uid struct returned from a successful PICC_Select().
+void MFRC522::PICC_DumpMifareClassicToSerial(	PICC_Uid *uid,			///< Pointer to Uid struct returned from a successful PICC_Select().
 												PICC_Type piccType,	///< One of the PICC_Type enums.
 												MIFARE_Key *key		///< Key A used for all sectors.
 											) {
@@ -1417,6 +1769,7 @@ void MFRC522::PICC_DumpMifareClassicToSerial(	Uid *uid,			///< Pointer to Uid st
 	if (no_of_sectors) {
 		Serial.println(F("Sector Block   0  1  2  3   4  5  6  7   8  9 10 11  12 13 14 15  AccessBits"));
 		for (int8_t i = no_of_sectors - 1; i >= 0; i--) {
+			wdt_reset();
 			PICC_DumpMifareClassicSectorToSerial(uid, key, i);
 		}
 	}
@@ -1429,7 +1782,7 @@ void MFRC522::PICC_DumpMifareClassicToSerial(	Uid *uid,			///< Pointer to Uid st
  * Uses PCD_Authenticate(), MIFARE_Read() and PCD_StopCrypto1.
  * Always uses PICC_CMD_MF_AUTH_KEY_A because only Key A can always read the sector trailer access bits.
  */
-void MFRC522::PICC_DumpMifareClassicSectorToSerial(Uid *uid,			///< Pointer to Uid struct returned from a successful PICC_Select().
+void MFRC522::PICC_DumpMifareClassicSectorToSerial(PICC_Uid *uid,			///< Pointer to Uid struct returned from a successful PICC_Select().
 													MIFARE_Key *key,	///< Key A for the sector.
 													byte sector			///< The sector to dump, 0..39.
 													) {
@@ -1587,6 +1940,7 @@ void MFRC522::PICC_DumpMifareUltralightToSerial() {
 	// Try the mpages of the original Ultralight. Ultralight C has more pages.
 	for (byte page = 0; page < 16; page +=4) { // Read returns data for 4 pages at a time.
 		// Read pages
+		wdt_reset();
 		byteCount = sizeof(buffer);
 		status = MIFARE_Read(page, buffer, &byteCount);
 		if (status != STATUS_OK) {
@@ -1634,6 +1988,210 @@ void MFRC522::MIFARE_SetAccessBits(	byte *accessBitBuffer,	///< Pointer to byte 
 	accessBitBuffer[2] =          c3 << 4 | c2;
 } // End MIFARE_SetAccessBits()
 
+
+/**
+ * Performs the "magic sequence" needed to get Chinese UID changeable
+ * Mifare cards to allow writing to sector 0, where the card UID is stored.
+ *
+ * Note that you do not need to have selected the card through REQA or WUPA,
+ * this sequence works immediately when the card is in the reader vicinity.
+ * This means you can use this method even on "bricked" cards that your reader does
+ * not recognise anymore (see MFRC522::MIFARE_UnbrickUidSector).
+ * 
+ * Of course with non-bricked devices, you're free to select them before calling this function.
+ */
+bool MFRC522::MIFARE_OpenUidBackdoor(bool logErrors) {
+	// Magic sequence:
+	// > 50 00 57 CD (HALT + CRC)
+	// > 40 (7 bits only)
+	// < A (4 bits only)
+	// > 43
+	// < A (4 bits only)
+	// Then you can write to sector 0 without authenticating
+	
+	PICC_HaltA(); // 50 00 57 CD
+	
+	byte cmd = 0x40;
+	byte validBits = 7; /* Our command is only 7 bits. After receiving card response,
+						  this will contain amount of valid response bits. */
+	byte response[32]; // Card's response is written here
+	byte received;
+	MFRC522::StatusCode status = PCD_TransceiveData(&cmd, (byte)1, response, &received, &validBits, (byte)0, false); // 40
+	if(status != STATUS_OK) {
+		if(logErrors) {
+			Serial.println(F("Card did not respond to 0x40 after HALT command. Are you sure it is a UID changeable one?"));
+			Serial.print(F("Error name: "));
+			Serial.println(GetStatusCodeName(status));
+		}
+		return false;
+	}
+	if (received != 1 || response[0] != 0x0A) {
+		if (logErrors) {
+			Serial.print(F("Got bad response on backdoor 0x40 command: "));
+			Serial.print(response[0], HEX);
+			Serial.print(F(" ("));
+			Serial.print(validBits);
+			Serial.print(F(" valid bits)\r\n"));
+		}
+		return false;
+	}
+	
+	cmd = 0x43;
+	validBits = 8;
+	status = PCD_TransceiveData(&cmd, (byte)1, response, &received, &validBits, (byte)0, false); // 43
+	if(status != STATUS_OK) {
+		if(logErrors) {
+			Serial.println(F("Error in communication at command 0x43, after successfully executing 0x40"));
+			Serial.print(F("Error name: "));
+			Serial.println(GetStatusCodeName(status));
+		}
+		return false;
+	}
+	if (received != 1 || response[0] != 0x0A) {
+		if (logErrors) {
+			Serial.print(F("Got bad response on backdoor 0x43 command: "));
+			Serial.print(response[0], HEX);
+			Serial.print(F(" ("));
+			Serial.print(validBits);
+			Serial.print(F(" valid bits)\r\n"));
+		}
+		return false;
+	}
+	
+	// You can now write to sector 0 without authenticating!
+	return true;
+} // End MIFARE_OpenUidBackdoor()
+
+/**
+ * Reads entire block 0, including all manufacturer data, and overwrites
+ * that block with the new UID, a freshly calculated BCC, and the original
+ * manufacturer data.
+ *
+ * It assumes a default KEY A of 0xFFFFFFFFFFFF.
+ * Make sure to have selected the card before this function is called.
+ */
+bool MFRC522::MIFARE_SetUid(byte *newUid, byte uidSize, bool logErrors) {
+	
+	// UID + BCC byte can not be larger than 16 together
+	if (!newUid || !uidSize || uidSize > 15) {
+		if (logErrors) {
+			Serial.println(F("New UID buffer empty, size 0, or size > 15 given"));
+		}
+		return false;
+	}
+	
+
+	// Authenticate for reading
+	MIFARE_Key key = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+MFRC522::StatusCode status = PCD_Authenticate(//MFRC522::
+												PICC_CMD_MF_AUTH_KEY_A, (byte)1, &key, &uid);
+	if (status != STATUS_OK) {
+		
+		if (status == STATUS_TIMEOUT) {
+			// We get a read timeout if no card is selected yet, so let's select one
+			
+			// Wake the card up again if sleeping
+//			  byte atqa_answer[2];
+//			  byte atqa_size = 2;
+//			  PICC_WakeupA(atqa_answer, &atqa_size);
+			
+			if (!PICC_IsNewCardPresent() || !PICC_ReadCardSerial()) {
+				Serial.println(F("No card was previously selected, and none are available. Failed to set UID."));
+				return false;
+			}
+			
+			status = PCD_Authenticate(//MFRC522::
+										PICC_CMD_MF_AUTH_KEY_A, (byte)1, &key, &uid);
+			if (status != STATUS_OK) {
+				// We tried, time to give up
+				if (logErrors) {
+					Serial.println(F("Failed to authenticate to card for reading, could not set UID: "));
+					Serial.println(GetStatusCodeName(status));
+				}
+				return false;
+			}
+		}
+		else {
+			if (logErrors) {
+				Serial.print(F("PCD_Authenticate() failed: "));
+				Serial.println(GetStatusCodeName(status));
+			}
+			return false;
+		}
+	}
+	
+	// Read block 0
+	byte block0_buffer[18];
+	byte byteCount = sizeof(block0_buffer);
+	status = MIFARE_Read((byte)0, block0_buffer, &byteCount);
+	if (status != STATUS_OK) {
+		if (logErrors) {
+			Serial.print(F("MIFARE_Read() failed: "));
+			Serial.println(GetStatusCodeName(status));
+			Serial.println(F("Are you sure your KEY A for sector 0 is 0xFFFFFFFFFFFF?"));
+		}
+		return false;
+	}
+	
+	// Write new UID to the data we just read, and calculate BCC byte
+	byte bcc = 0;
+	for (uint8_t i = 0; i < uidSize; i++) {
+		block0_buffer[i] = newUid[i];
+		bcc ^= newUid[i];
+	}
+	
+	// Write BCC byte to buffer
+	block0_buffer[uidSize] = bcc;
+	
+	// Stop encrypted traffic so we can send raw bytes
+	PCD_StopCrypto1();
+	
+	// Activate UID backdoor
+	if (!MIFARE_OpenUidBackdoor(logErrors)) {
+		if (logErrors) {
+			Serial.println(F("Activating the UID backdoor failed."));
+		}
+		return false;
+	}
+	
+	// Write modified block 0 back to card
+	status = MIFARE_Write((byte)0, block0_buffer, (byte)16);
+	if (status != STATUS_OK) {
+		if (logErrors) {
+			Serial.print(F("MIFARE_Write() failed: "));
+			Serial.println(GetStatusCodeName(status));
+		}
+		return false;
+	}
+	
+	// Wake the card up again
+	byte atqa_answer[2];
+	byte atqa_size = 2;
+	PICC_WakeupA(atqa_answer, &atqa_size);
+	
+	return true;
+}
+
+/**
+ * Resets entire sector 0 to zeroes, so the card can be read again by readers.
+ */
+bool MFRC522::MIFARE_UnbrickUidSector(bool logErrors) {
+	MIFARE_OpenUidBackdoor(logErrors);
+	
+	byte block0_buffer[] = {0x01, 0x02, 0x03, 0x04, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+	
+	// Write modified block 0 back to card
+	MFRC522::StatusCode status = MIFARE_Write((byte)0, block0_buffer, (byte)16);
+	if (status != STATUS_OK) {
+		if (logErrors) {
+			Serial.print(F("MIFARE_Write() failed: "));
+			Serial.println(GetStatusCodeName(status));
+		}
+		return false;
+	}
+	return true;
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
 // Convenience functions - does not add extra functionality
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1670,3 +2228,6 @@ bool MFRC522::PICC_ReadCardSerial() {
 	MFRC522::StatusCode result = PICC_Select(&uid);
 	return (result == STATUS_OK);
 } // End 
+
+
+
